@@ -998,6 +998,62 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_BANNER"] {
     exit(0)
 }
 
+if let path = ProcessInfo.processInfo.environment["PULLTIMER_HERO"] {
+    let size = CGSize(width: 1280, height: 420)
+    let view = OverlayView(frame: CGRect(origin: .zero, size: size))
+    let home = CGPoint(x: 1130, y: 368)
+    view.origin = home
+    func rounded(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    }
+    view.underlay = {
+        NSGradient(starting: NSColor(red: 0.04, green: 0.05, blue: 0.15, alpha: 1),
+                   ending: NSColor(red: 0.17, green: 0.08, blue: 0.3, alpha: 1))!.draw(in: view.bounds, angle: 20)
+        NSGradient(colors: [NSColor(red: 1, green: 0.5, blue: 0.12, alpha: 0.95),
+                            NSColor(red: 0.96, green: 0.22, blue: 0.38, alpha: 0.5),
+                            NSColor(red: 0.5, green: 0.2, blue: 0.7, alpha: 0)])!
+            .draw(fromCenter: home, radius: 0, toCenter: home, radius: 640, options: [])
+        for k in 0..<40 {
+            let r = Scale.deadZone + Scale.step * CGFloat(k)
+            let ring = NSBezierPath(ovalIn: CGRect(x: home.x - r, y: home.y - r, width: 2 * r, height: 2 * r))
+            ring.lineWidth = 1
+            NSColor.white.withAlphaComponent(max(0.16 - CGFloat(k) * 0.004, 0.03)).setStroke()
+            ring.stroke()
+        }
+        NSAttributedString(string: "Pull Timer", attributes: [
+            .font: rounded(104, .heavy), .foregroundColor: NSColor.white, .kern: -2,
+        ]).draw(at: CGPoint(x: 72, y: 212))
+        NSAttributedString(string: "Pull a timer out of your menu bar.", attributes: [
+            .font: rounded(30, .medium), .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+        ]).draw(at: CGPoint(x: 78, y: 160))
+        var x: CGFloat = 78
+        for (index, text) in ["⌥  second timer", "⇧  pomodoro", "chime + banner"].enumerated() {
+            let label = NSAttributedString(string: text, attributes: [
+                .font: rounded(17, .semibold), .foregroundColor: NSColor.white,
+            ])
+            let icon: CGFloat = index == 1 ? 26 : 0
+            let chip = CGRect(x: x, y: 82, width: label.size().width + 32 + icon, height: 38)
+            NSColor.white.withAlphaComponent(0.13).setFill()
+            NSBezierPath(roundedRect: chip, xRadius: 19, yRadius: 19).fill()
+            label.draw(at: CGPoint(x: chip.minX + 16, y: chip.midY - label.size().height / 2))
+            if icon > 0 { tomatoGlyph(size: 20, color: nil).draw(in: CGRect(x: chip.maxX - 34, y: chip.midY - 9, width: 20, height: 20)) }
+            x = chip.maxX + 12
+        }
+    }
+    for step in 1...60 {
+        let t = Double(step) / 60, bend = sin(t * .pi) * 60
+        view.track(CGPoint(x: home.x - 270 * t + bend, y: home.y - 175 * t + bend * 0.3))
+    }
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width) * 2, pixelsHigh: Int(size.height) * 2,
+                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    rep.size = size
+    view.cacheDisplay(in: view.bounds, to: rep)
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+    exit(0)
+}
+
 if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
     let parts = (ProcessInfo.processInfo.environment["PULLTIMER_PULL"] ?? "-60,-420")
         .split(separator: ",").compactMap { Double($0) }
@@ -1012,18 +1068,29 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
     view.showMarks = env["PULLTIMER_MARKS"] != nil
     var title = env["PULLTIMER_RUNNING"] ?? ""
     var dim: CGFloat = 0.35
+    var tomatoIcon = false
+    var alertColor: NSColor?
+    var floating: NSImage?
+    var floatingAlpha: CGFloat = 0
     if env["PULLTIMER_RUNNING"] != nil {
         view.underlay = {
             NSGradient(starting: NSColor(red: 0.16, green: 0.22, blue: 0.38, alpha: 1),
                        ending: NSColor(red: 0.42, green: 0.36, blue: 0.52, alpha: 1))!.draw(in: view.bounds, angle: 70)
             NSColor.black.withAlphaComponent(0.35).setFill()
             CGRect(x: 0, y: view.bounds.height - 24, width: view.bounds.width, height: 24).fill()
-            pullGlyph(size: 18, color: NSColor.white.withAlphaComponent(dim))
+            let tint = (alertColor ?? .white).withAlphaComponent(dim)
+            (tomatoIcon ? tomatoGlyph(size: 18, color: nil) : pullGlyph(size: 18, color: tint))
                 .draw(in: CGRect(x: home.x - 9, y: home.y - 9, width: 18, height: 18))
             NSAttributedString(string: title, attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular),
-                .foregroundColor: NSColor.white.withAlphaComponent(dim),
+                .foregroundColor: tint,
             ]).draw(at: CGPoint(x: home.x + 13, y: home.y - 8))
+            if let floating, floatingAlpha > 0 {
+                let size = floating.size
+                let rect = CGRect(x: view.bounds.midX - size.width / 2, y: view.bounds.midY - size.height / 2 - 10,
+                                  width: size.width, height: size.height)
+                floating.draw(in: rect, from: .zero, operation: .sourceOver, fraction: floatingAlpha)
+            }
         }
     }
     func point(_ t: Double) -> CGPoint {
@@ -1032,8 +1099,9 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
     }
     if path.hasSuffix(".gif") {
         let pullFrames = 40
+        let timesUp = env["PULLTIMER_SCENE"] == "timesup"
         let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
-                                                   "com.compuserve.gif" as CFString, pullFrames + 3, nil)!
+                                                   "com.compuserve.gif" as CFString, timesUp ? 16 : pullFrames + 3, nil)!
         CGImageDestinationSetProperties(dest, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
         func frame(_ delay: Double) {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(dims[0]), pixelsHigh: Int(dims[1]),
@@ -1042,6 +1110,31 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
             view.cacheDisplay(in: view.bounds, to: rep)
             CGImageDestinationAddImage(dest, rep.cgImage!, [kCGImagePropertyGIFDictionary:
                 [kCGImagePropertyGIFDelayTime: delay, kCGImagePropertyGIFUnclampedDelayTime: delay]] as CFDictionary)
+        }
+        if timesUp {
+            let bannerView = BannerView(title: "Time's up", body: "Your 5 min timer is done.")
+            let bannerRep = bannerView.bitmapImageRepForCachingDisplay(in: bannerView.bounds)!
+            bannerView.cacheDisplay(in: bannerView.bounds, to: bannerRep)
+            let image = NSImage(size: bannerView.bounds.size)
+            image.addRepresentation(bannerRep)
+            floating = image
+            dim = 1
+            view.track(home)
+            for left in [3.0, 2, 1] {
+                title = clock(left)
+                frame(0.8)
+            }
+            title = "Time's up"
+            alertColor = .systemOrange
+            for step in 0..<12 {
+                floatingAlpha = min(CGFloat(step + 1) / 4, 1)
+                dim = step < 4 || (step / 2) % 2 == 0 ? 1 : 0.3
+                frame(step < 4 ? 0.06 : 0.3)
+            }
+            dim = 1
+            frame(1.6)
+            CGImageDestinationFinalize(dest)
+            exit(0)
         }
         dim = 1
         view.track(home)
@@ -1053,7 +1146,13 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
             frame(step == pullFrames ? 1.3 : 0.045)
         }
         dim = 1
-        title = (env["PULLTIMER_RUNNING"] ?? "") + "  ② " + clock(Scale.seconds(forDistance: hypot(parts[0], parts[1])) ?? 0)
+        let pulled = hypot(parts[0], parts[1])
+        if view.pomodoro {
+            tomatoIcon = true
+            title = "focus " + clock(Scale.seconds(forDistance: pulled, Pomodoro.pullMarks) ?? 0)
+        } else {
+            title = (env["PULLTIMER_RUNNING"] ?? "") + "  ② " + clock(Scale.seconds(forDistance: pulled) ?? 0)
+        }
         view.track(home)
         frame(2.2)
         frame(0.1)
