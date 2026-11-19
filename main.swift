@@ -8,12 +8,12 @@ enum Scale {
     static let marks: [Double] = [30, 60, 120, 180, 300, 420, 600, 900, 1200, 1800, 2700, 3600,
                                   5400, 7200, 10800, 14400, 21600, 28800, 43200, 86400]
 
-    static func seconds(forDistance d: CGFloat) -> Double? {
+    static func seconds(forDistance d: CGFloat, _ marks: [Double] = marks) -> Double? {
         guard d >= deadZone else { return nil }
         return marks[min(Int((d - deadZone) / step), marks.count - 1)]
     }
 
-    static func distance(forSeconds s: Double) -> CGFloat {
+    static func distance(forSeconds s: Double, _ marks: [Double] = marks) -> CGFloat {
         deadZone + step * CGFloat(marks.firstIndex(of: s) ?? 0)
     }
 }
@@ -50,6 +50,45 @@ struct Slot {
     var duration: Double = 0
     var previousEnd: Date?
     var previousDuration: Double = 0
+}
+
+enum Pomodoro {
+    static let settings: [(title: String, key: String, fallback: Double, choices: [Double])] = [
+        ("Focus", "pomodoroFocus", 25, [15, 20, 25, 30, 40, 45, 50, 60, 90]),
+        ("Break", "pomodoroBreak", 5, [3, 5, 7, 10, 15]),
+        ("Long break", "pomodoroLong", 15, [10, 15, 20, 30, 45]),
+        ("Focus rounds before long break", "pomodoroRounds", 4, [2, 3, 4, 5, 6]),
+    ]
+
+    static func value(_ key: String) -> Double {
+        let value = UserDefaults.standard.double(forKey: key)
+        return value > 0 ? value : settings.first { $0.key == key }!.fallback
+    }
+
+    static let pullMarks: [Double] = settings[0].choices.map { $0 * 60 }
+
+    static func breakMinutes(focus: Double) -> Double { focus / 5 }
+
+    static func longMinutes(focus: Double) -> Double { focus * 3 / 5 }
+
+    static var rounds: Int { max(Int(value("pomodoroRounds")), 1) }
+
+    static func isFocus(_ phase: Int) -> Bool { phase % 2 == 0 }
+
+    static func isLongBreak(_ phase: Int) -> Bool { phase % 2 == 1 && (phase / 2 + 1) % rounds == 0 }
+
+    static func seconds(_ phase: Int) -> Double {
+        value(isFocus(phase) ? "pomodoroFocus" : isLongBreak(phase) ? "pomodoroLong" : "pomodoroBreak") * 60
+    }
+
+    static func name(_ phase: Int) -> String {
+        if isFocus(phase) { return "focus \(phase / 2 % rounds + 1) of \(rounds)" }
+        return isLongBreak(phase) ? "long break" : "break"
+    }
+
+    static var summary: String {
+        ["pomodoroFocus", "pomodoroBreak", "pomodoroLong"].map { String(format: "%g", value($0)) }.joined(separator: "/")
+    }
 }
 
 enum TimerLog {
@@ -100,12 +139,49 @@ func pullGlyph(size: CGFloat, color: NSColor) -> NSImage {
     }
 }
 
+func tomatoGlyph(size: CGFloat, color: NSColor?) -> NSImage {
+    NSImage(size: CGSize(width: size, height: size), flipped: false) { rect in
+        let u = rect.width / 18
+        let body = NSBezierPath(ovalIn: CGRect(x: 2.2 * u, y: 1.2 * u, width: 13.6 * u, height: 11.8 * u))
+        if let color {
+            color.set()
+            body.lineWidth = 1.6 * u
+            body.stroke()
+        } else {
+            NSColor(red: 0.9, green: 0.2, blue: 0.13, alpha: 1).setFill()
+            body.fill()
+            NSColor(red: 0.22, green: 0.6, blue: 0.22, alpha: 1).set()
+        }
+        let top = CGPoint(x: 9 * u, y: 12.4 * u)
+        func polar(_ degrees: CGFloat, _ radius: CGFloat) -> CGPoint {
+            CGPoint(x: top.x + cos(degrees * .pi / 180) * radius * u, y: top.y + sin(degrees * .pi / 180) * radius * u)
+        }
+        let leaves = NSBezierPath()
+        for angle: CGFloat in [195, 232, 270, 308, 345] {
+            leaves.move(to: top)
+            leaves.line(to: polar(angle - 30, 2))
+            leaves.line(to: polar(angle, 4.8))
+            leaves.line(to: polar(angle + 30, 2))
+            leaves.close()
+        }
+        leaves.fill()
+        let stem = NSBezierPath()
+        stem.move(to: top)
+        stem.line(to: CGPoint(x: 10.2 * u, y: 16.6 * u))
+        stem.lineWidth = 1.7 * u
+        stem.lineCapStyle = .round
+        stem.stroke()
+        return true
+    }
+}
+
 final class OverlayView: NSView {
     var origin = CGPoint.zero
     var backdrop: NSColor?
     var underlay: (() -> Void)?
     var timerRunning = false
     var slot = 0
+    var pomodoro = false
     var showMarks = false
     private var cursor = CGPoint.zero
     private var trail: [CGPoint] = []
@@ -167,7 +243,8 @@ final class OverlayView: NSView {
         let d = radius(cursor)
         guard d > 1 else { return }
         let perp = labelSide(CGPoint(x: (cursor.x - origin.x) / d, y: (cursor.y - origin.y) / d))
-        let seconds = Scale.seconds(forDistance: d)
+        let marks = pomodoro ? Pomodoro.pullMarks : Scale.marks
+        let seconds = Scale.seconds(forDistance: d, marks)
         let accent = NSColor.white
 
         func stroke(_ points: [CGPoint], _ color: NSColor, _ width: CGFloat) {
@@ -185,8 +262,8 @@ final class OverlayView: NSView {
         stroke(path, NSColor.black.withAlphaComponent(0.5), 4)
         stroke(path, seconds == nil ? NSColor.white.withAlphaComponent(0.5) : accent, 2)
 
-        for (index, mark) in Scale.marks.enumerated() {
-            let dm = Scale.distance(forSeconds: mark)
+        for (index, mark) in marks.enumerated() {
+            let dm = Scale.distance(forSeconds: mark, marks)
             guard showMarks, dm <= d + 0.5 else { break }
             var i = path.count - 2
             if let found = (0..<(path.count - 1)).first(where: { radius(path[$0 + 1]) >= dm }) { i = found }
@@ -221,7 +298,8 @@ final class OverlayView: NSView {
         NSColor.white.setStroke()
         knob.lineWidth = 2
         knob.stroke()
-        pullGlyph(size: 22, color: .white).draw(in: CGRect(x: cursor.x - 11, y: cursor.y - 11, width: 22, height: 22))
+        (pomodoro ? tomatoGlyph(size: 22, color: nil) : pullGlyph(size: 22, color: .white))
+            .draw(in: CGRect(x: cursor.x - 11, y: cursor.y - 11, width: 22, height: 22))
 
         var lines: [NSAttributedString]
         if let seconds {
@@ -235,7 +313,18 @@ final class OverlayView: NSView {
                     .foregroundColor: NSColor.white.withAlphaComponent(0.8),
                 ]),
             ]
-            if slot == 1 {
+            if pomodoro {
+                let focus = seconds / 60
+                let rest = String(format: "break %g min, long break %g min", Pomodoro.breakMinutes(focus: focus), Pomodoro.longMinutes(focus: focus))
+                lines[1] = NSAttributedString(string: rest, attributes: [
+                    .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.8),
+                ])
+                lines.insert(NSAttributedString(string: "POMODORO FOCUS", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.8),
+                ]), at: 0)
+            } else if slot == 1 {
                 lines.insert(NSAttributedString(string: "TIMER 2", attributes: [
                     .font: NSFont.systemFont(ofSize: 11, weight: .bold),
                     .foregroundColor: NSColor.white.withAlphaComponent(0.8),
@@ -276,6 +365,48 @@ final class OverlayView: NSView {
     }
 }
 
+final class BannerView: NSView {
+    var onClick: () -> Void = {}
+    private let lines: [NSAttributedString]
+    private let glyph: CGFloat = 46
+    private let tomato: Bool
+
+    init(title: String, body: String, tomato: Bool = false) {
+        self.tomato = tomato
+        func line(_ text: String, _ size: CGFloat, _ weight: NSFont.Weight, _ alpha: CGFloat) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [
+                .font: NSFont.systemFont(ofSize: size, weight: weight),
+                .foregroundColor: NSColor.white.withAlphaComponent(alpha),
+            ])
+        }
+        lines = [line(title, 40, .bold, 1), line(body, 16, .regular, 0.85), line("Click to dismiss", 12, .regular, 0.5)]
+        let width = max(lines.map { $0.size().width }.max()! + 110, 380)
+        let height = lines.map { $0.size().height }.reduce(0, +) + glyph + 84
+        super.init(frame: CGRect(x: 0, y: 0, width: width, height: height))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.black.withAlphaComponent(0.86).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 26, yRadius: 26).fill()
+        var y = bounds.height - 30 - glyph
+        (tomato ? tomatoGlyph(size: glyph, color: nil) : pullGlyph(size: glyph, color: .white)).draw(in: CGRect(x: bounds.midX - glyph / 2, y: y, width: glyph, height: glyph))
+        y -= 8
+        for (index, text) in lines.enumerated() {
+            let size = text.size()
+            y -= size.height + (index == 2 ? 14 : 2)
+            text.draw(at: CGPoint(x: bounds.midX - size.width / 2, y: y))
+        }
+    }
+}
+
 final class DragCatcher: NSView {
     var onDown: () -> Void = {}
     var onRightDown: () -> Void = {}
@@ -303,6 +434,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var ticker: Timer?
     private var slots = [Slot(), Slot()]
     private var alertText: String?
+    private var banner: NSPanel?
+    private var pomodoro: Int?
+    private var alertID = 0
+    private var iconKey = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -338,6 +473,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 slots[slot].end = Date(timeIntervalSince1970: saved)
                 slots[slot].duration = defaults.double(forKey: "duration\(slot)")
             }
+        }
+        if slots[0].end != nil, defaults.object(forKey: "pomodoroPhase") != nil {
+            pomodoro = defaults.integer(forKey: "pomodoroPhase")
         }
         refresh()
     }
@@ -399,6 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let window = overlayWindow, let view = overlayView else { return }
         view.origin = CGPoint(x: dragOrigin.x - window.frame.minX, y: dragOrigin.y - window.frame.minY)
         view.slot = pulledSlot()
+        view.pomodoro = pulledPomodoro()
         view.timerRunning = slots[view.slot].end != nil
         view.track(CGPoint(x: mouse.x - window.frame.minX, y: mouse.y - window.frame.minY))
     }
@@ -422,27 +561,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         let mouse = NSEvent.mouseLocation
-        let seconds = Scale.seconds(forDistance: hypot(mouse.x - dragOrigin.x, mouse.y - dragOrigin.y))
+        let distance = hypot(mouse.x - dragOrigin.x, mouse.y - dragOrigin.y)
+        let seconds = Scale.seconds(forDistance: distance)
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
         overlayView = nil
         statusItem.button?.alphaValue = 1
-        if let seconds {
+        if pulledPomodoro() {
+            if let focus = Scale.seconds(forDistance: distance, Pomodoro.pullMarks).map({ $0 / 60 }) {
+                UserDefaults.standard.set(focus, forKey: "pomodoroFocus")
+                UserDefaults.standard.set(Pomodoro.breakMinutes(focus: focus), forKey: "pomodoroBreak")
+                UserDefaults.standard.set(Pomodoro.longMinutes(focus: focus), forKey: "pomodoroLong")
+                startPomodoro()
+            } else {
+                cancel(0)
+            }
+        } else if let seconds {
             start(pulledSlot(), seconds)
         } else {
             cancel(pulledSlot())
         }
     }
 
-    private func pulledSlot() -> Int {
-        NSEvent.modifierFlags.contains(.option) ? 1 : 0
+    private func pulledPomodoro() -> Bool {
+        NSEvent.modifierFlags.contains(.shift)
     }
 
-    private func startAlert(_ slot: Int) {
-        guard let button = statusItem.button else { return }
+    private func pulledSlot() -> Int {
+        NSEvent.modifierFlags.contains(.option) && !pulledPomodoro() ? 1 : 0
+    }
+
+    private func startAlert(_ title: String, _ body: String, brief: Bool = false) {
         NSSound(named: "Glass")?.play()
-        button.image = pullGlyph(size: 18, color: .systemOrange)
-        alertText = slot == 0 ? "Time's up" : "Timer 2 is up"
+        alertText = title
+        alertID += 1
+        if brief {
+            let id = alertID
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, self.alertID == id, self.blinker != nil else { return }
+                self.stopAlert()
+            }
+        }
         blinker?.invalidate()
         let timer = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
             guard let button = self?.statusItem.button else { return }
@@ -450,17 +609,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         RunLoop.main.add(timer, forMode: .common)
         blinker = timer
+        if !UserDefaults.standard.bool(forKey: "hideBanner") { showBanner(title, body, tomato: brief) }
+    }
+
+    private func doneText(_ slot: Int) -> String {
+        "Your \(spoken(slots[slot].duration)) timer\(slot == 1 ? " (timer 2)" : "") is done."
+    }
+
+    private func showBanner(_ title: String, _ body: String, tomato: Bool) {
+        banner?.orderOut(nil)
+        let view = BannerView(title: title, body: body, tomato: tomato)
+        view.onClick = { [weak self] in self?.stopAlert() }
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let origin = CGPoint(x: screen.frame.midX - view.bounds.width / 2, y: screen.frame.midY - view.bounds.height / 2)
+        let panel = NSPanel(contentRect: CGRect(origin: origin, size: view.bounds.size),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.contentView = view
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        panel.animator().alphaValue = 1
+        banner = panel
     }
 
     private func stopAlert() {
+        banner?.orderOut(nil)
+        banner = nil
         blinker?.invalidate()
         blinker = nil
         alertText = nil
         guard let button = statusItem.button else { return }
         button.alphaValue = 1
         button.attributedTitle = NSAttributedString(string: "")
-        button.image = pullGlyph(size: 18, color: .black)
-        button.image?.isTemplate = true
         updateTitle()
     }
 
@@ -483,8 +670,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         statusItem.button?.alphaValue = 0.3
     }
 
+    private func beginPhase(_ phase: Int) {
+        let seconds = Pomodoro.seconds(phase)
+        pomodoro = phase
+        slots[0].end = Date().addingTimeInterval(seconds)
+        slots[0].duration = seconds
+        TimerLog.add("pomodoro \(Pomodoro.name(phase)) started, \(spoken(seconds))")
+    }
+
     private func start(_ slot: Int, _ seconds: Double) {
         stopAlert()
+        if slot == 0 { pomodoro = nil }
         remember(slot)
         let end = Date().addingTimeInterval(seconds)
         slots[slot].end = end
@@ -500,6 +696,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func cancel(_ slot: Int) {
+        if slot == 0 { pomodoro = nil }
         guard let end = slots[slot].end else { return }
         remember(slot)
         slots[slot].end = nil
@@ -511,6 +708,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let end = slots[slot].previousEnd, end > Date() else { return }
         let duration = slots[slot].previousDuration
         slots[slot].previousEnd = nil
+        if slot == 0 { pomodoro = nil }
         remember(slot)
         slots[slot].end = end
         slots[slot].duration = duration
@@ -527,6 +725,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } else {
                 defaults.removeObject(forKey: "endDate\(slot)")
             }
+        }
+        if let pomodoro {
+            defaults.set(pomodoro, forKey: "pomodoroPhase")
+        } else {
+            defaults.removeObject(forKey: "pomodoroPhase")
         }
         if slots.contains(where: { $0.end != nil }) {
             if ticker == nil {
@@ -547,9 +750,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             guard let end = slots[slot].end, end.timeIntervalSinceNow <= 0 else { continue }
             slots[slot].end = nil
             finished = true
+            if slot == 0, let phase = pomodoro {
+                beginPhase(phase + 1)
+                let title = Pomodoro.isFocus(phase + 1) ? "Back to focus" : Pomodoro.isLongBreak(phase + 1) ? "Long break" : "Break time"
+                let body = "\(spoken(slots[0].duration)), until \(timeOfDay(slots[0].end!))."
+                notify(title, body)
+                startAlert(title, body, brief: true)
+                continue
+            }
             TimerLog.add("timer \(slot + 1) finished, \(spoken(slots[slot].duration))")
-            notify(slot)
-            startAlert(slot)
+            let title = slot == 0 ? "Time's up" : "Timer 2 is up"
+            notify(title, doneText(slot))
+            startAlert(title, doneText(slot))
         }
         if finished {
             refresh()
@@ -558,10 +770,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    private func updateIcon() {
+        guard let button = statusItem.button else { return }
+        let focus = pomodoro.map { Pomodoro.isFocus($0) }
+        let key = "\(String(describing: focus)) \(alertText != nil)"
+        guard key != iconKey else { return }
+        iconKey = key
+        if let focus {
+            button.image = tomatoGlyph(size: 18, color: focus ? nil : .black)
+            button.image?.isTemplate = !focus
+        } else {
+            button.image = pullGlyph(size: 18, color: alertText != nil ? .systemOrange : .black)
+            button.image?.isTemplate = alertText == nil
+        }
+    }
+
     private func updateTitle() {
+        updateIcon()
         guard let button = statusItem.button else { return }
         var parts: [String] = []
-        if let end = slots[0].end { parts.append(clock(end.timeIntervalSinceNow)) }
+        if let end = slots[0].end {
+            let prefix = pomodoro.map { Pomodoro.isFocus($0) ? "focus " : "break " } ?? ""
+            parts.append(prefix + clock(end.timeIntervalSinceNow))
+        }
         if let end = slots[1].end { parts.append("② " + clock(end.timeIntervalSinceNow)) }
         if let alertText {
             button.attributedTitle = NSAttributedString(string: " " + ([alertText] + parts).joined(separator: "  "), attributes: [
@@ -573,19 +804,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func notify(_ slot: Int) {
-        let body = "Your \(spoken(slots[slot].duration)) timer\(slot == 1 ? " (timer 2)" : "") is done."
+    private func notify(_ title: String, _ body: String) {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
                 let content = UNMutableNotificationContent()
-                content.title = "Time's up"
+                content.title = title
                 content.body = body
                 center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
             } else {
                 DispatchQueue.main.async {
                     let alert = NSAlert()
-                    alert.messageText = "Time's up"
+                    alert.messageText = title
                     alert.informativeText = body
                     NSApp.activate(ignoringOtherApps: true)
                     alert.runModal()
@@ -614,8 +844,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         for (slot, state) in slots.enumerated() {
             if let end = state.end {
-                note("Timer \(slot + 1) rings at \(timeOfDay(end))", in: menu)
-                action("Cancel timer \(slot + 1)", #selector(cancelTimer(_:)), slot)
+                if slot == 0, let phase = pomodoro {
+                    note("Pomodoro: \(Pomodoro.name(phase)) until \(timeOfDay(end))", in: menu)
+                    action("Stop pomodoro", #selector(cancelTimer(_:)), slot)
+                } else {
+                    note("Timer \(slot + 1) rings at \(timeOfDay(end))", in: menu)
+                    action("Cancel timer \(slot + 1)", #selector(cancelTimer(_:)), slot)
+                }
             }
             if let previous = state.previousEnd, previous > Date() {
                 action("Restore previous timer \(slot + 1) (rings at \(timeOfDay(previous)))", #selector(restoreTimer(_:)), slot)
@@ -625,6 +860,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             note("Drag the icon to set a timer", in: menu)
         }
         note("Hold ⌥ while dragging for timer 2", in: menu)
+        note("Hold ⇧ while dragging for a pomodoro", in: menu)
+        if pomodoro == nil {
+            action("Start pomodoro (\(Pomodoro.summary) min)", #selector(startPomodoro), 0)
+            menu.items.last?.image = tomatoGlyph(size: 16, color: nil)
+        }
         menu.addItem(.separator())
         let log = NSMenuItem(title: "Log", action: nil, keyEquivalent: "")
         let logMenu = NSMenu()
@@ -635,10 +875,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         logMenu.addItem(withTitle: "Open log file", action: #selector(openLog), keyEquivalent: "").target = self
         log.submenu = logMenu
         menu.addItem(log)
+        let lengths = NSMenuItem(title: "Pomodoro settings", action: nil, keyEquivalent: "")
+        lengths.image = tomatoGlyph(size: 16, color: nil)
+        let lengthsMenu = NSMenu()
+        for (index, setting) in Pomodoro.settings.enumerated() {
+            if index > 0 { lengthsMenu.addItem(.separator()) }
+            note(setting.title, in: lengthsMenu)
+            for choice in Set(setting.choices + [Pomodoro.value(setting.key)]).sorted() {
+                let unit = setting.key == "pomodoroRounds" ? "" : " min"
+                let item = NSMenuItem(title: String(format: "%g", choice) + unit, action: #selector(setPomodoro(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                item.representedObject = choice
+                item.state = Pomodoro.value(setting.key) == choice ? .on : .off
+                lengthsMenu.addItem(item)
+            }
+        }
+        lengths.submenu = lengthsMenu
+        menu.addItem(lengths)
         let marks = NSMenuItem(title: "Show scale marks while pulling", action: #selector(toggleMarks), keyEquivalent: "")
         marks.target = self
         marks.state = UserDefaults.standard.bool(forKey: "showMarks") ? .on : .off
         menu.addItem(marks)
+        let bannerItem = NSMenuItem(title: "Show banner mid-screen when time is up", action: #selector(toggleBanner), keyEquivalent: "")
+        bannerItem.target = self
+        bannerItem.state = UserDefaults.standard.bool(forKey: "hideBanner") ? .off : .on
+        menu.addItem(bannerItem)
         let login = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -657,8 +919,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         restore(sender.tag)
     }
 
+    @objc private func startPomodoro() {
+        stopAlert()
+        remember(0)
+        beginPhase(0)
+        refresh()
+    }
+
+    @objc private func setPomodoro(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? Double else { return }
+        UserDefaults.standard.set(choice, forKey: Pomodoro.settings[sender.tag].key)
+        TimerLog.add("pomodoro \(Pomodoro.settings[sender.tag].title.lowercased()) set to \(String(format: "%g", choice))")
+    }
+
     @objc private func toggleMarks() {
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "showMarks"), forKey: "showMarks")
+    }
+
+    @objc private func toggleBanner() {
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "hideBanner"), forKey: "hideBanner")
     }
 
     @objc private func openLog() {
@@ -699,6 +978,26 @@ if let dir = ProcessInfo.processInfo.environment["PULLTIMER_ICONSET"] {
     exit(0)
 }
 
+if let path = ProcessInfo.processInfo.environment["PULLTIMER_BANNER"] {
+    let tomato = ProcessInfo.processInfo.environment["PULLTIMER_TOMATO"] != nil
+    let view = tomato ? BannerView(title: "Break time", body: "5 minutes, until 14:35.", tomato: true)
+        : BannerView(title: "Time's up", body: "Your 5 minutes timer is done.")
+    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    view.cacheDisplay(in: view.bounds, to: rep)
+    if tomato {
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor(white: 0.8, alpha: 1).setFill()
+        CGRect(x: 0, y: 0, width: 150, height: 44).fill()
+        tomatoGlyph(size: 18, color: nil).draw(in: CGRect(x: 8, y: 13, width: 18, height: 18))
+        tomatoGlyph(size: 18, color: .black).draw(in: CGRect(x: 34, y: 13, width: 18, height: 18))
+        tomatoGlyph(size: 40, color: nil).draw(in: CGRect(x: 60, y: 2, width: 40, height: 40))
+        tomatoGlyph(size: 40, color: .black).draw(in: CGRect(x: 104, y: 2, width: 40, height: 40))
+        NSGraphicsContext.current = nil
+    }
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+    exit(0)
+}
+
 if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
     let parts = (ProcessInfo.processInfo.environment["PULLTIMER_PULL"] ?? "-60,-420")
         .split(separator: ",").compactMap { Double($0) }
@@ -709,6 +1008,7 @@ if let path = ProcessInfo.processInfo.environment["PULLTIMER_SNAPSHOT"] {
     view.backdrop = NSColor(white: 0.45, alpha: 1)
     view.origin = home
     view.slot = Int(env["PULLTIMER_SLOT"] ?? "") ?? 0
+    view.pomodoro = env["PULLTIMER_POMODORO"] != nil
     view.showMarks = env["PULLTIMER_MARKS"] != nil
     var title = env["PULLTIMER_RUNNING"] ?? ""
     var dim: CGFloat = 0.35
